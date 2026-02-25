@@ -1,224 +1,231 @@
-# smart email assistant
+# AI Email Concierge
 
-a self-hosted email automation system built with n8n and ollama.  
-it reads incoming emails, understands intent using a local llm, replies automatically when safe, schedules meetings, and keeps full audit logs.
+A self-hosted email automation pipeline. Reads incoming Gmail, classifies intent with a local Ollama LLM, sends replies, creates Google Calendar events with Meet links, logs everything to Google Sheets, and posts traces to Slack.
 
-the system runs fully on your infrastructure.
-
-no external ai api keys.
+No cloud AI. No external API keys. Runs entirely on your infrastructure.
 
 ---
 
-## what this project does
+## Architecture
 
-you receive emails every day.  
-most of them follow patterns.
-
-this project automates that flow.
-
-it:
-
-- reads incoming emails from gmail
-- classifies intent using ollama llama 3.2 1b
-- decides whether to reply, schedule a meeting, or stop
-- sends replies through gmail
-- creates google calendar events with google meet links
-- logs every action in google sheets
-- posts execution traces to slack
-- sends low-confidence emails to manual review
-
-you control the data.  
-you control the model.  
-you control the workflow.
-
----
-
-## supported email intents
-
-each email is classified into one category:
-
-- general_inquiry  
-- support_request  
-- meeting_request  
-- spam  
-- out_of_office  
-
-spam and out_of_office are logged only.  
-no automated replies are sent.
+```
+Gmail (unread)
+      │
+      ▼
+email_classifier.py   ← Ollama / Llama 3.2:1b
+      │
+  intent + confidence
+      │
+      ▼
+    main.py  (router)
+      │
+  ┌───┴───────────────┐
+  ▼                   ▼
+Reply flow       Meeting flow
+  │                   │
+Gmail send    Google Calendar + Meet
+  │                   │
+  └────────┬──────────┘
+           ▼
+  email_responder.py
+           │
+    Google Sheets log
+           │
+    Slack notification
+```
 
 ---
 
-## high-level flow
+## Files
 
-incoming email
-|
-v
-n8n workflow
-|
-email preprocessing
-|
-ollama classification
-|
-intent + confidence
-/ |
-reply log meeting flow
-|
-google calendar + meet
-
-
-manual review triggers when confidence < 0.7.
+| File | Responsibility |
+|---|---|
+| `main.py` | Entry point, polling loop, routing logic |
+| `email_classifier.py` | Ollama classification, confidence thresholds, routing decisions |
+| `email_responder.py` | Gmail replies, Calendar events, Sheets logging, Slack notifications |
 
 ---
 
-## why this project exists
+## Intent Labels
 
-most email automations depend on cloud llms.  
-that creates cost risk and data exposure.
-
-this project solves that by:
-
-- running llm inference locally with ollama
-- using a small 1b model that fits modest hardware
-- keeping logic transparent inside n8n
-- making decisions traceable and auditable
-
-it works well for internal teams, startups, and ops-heavy workflows.
+| Label | Description | Action |
+|---|---|---|
+| `INQUIRY_STANDARD` | General questions, info requests | Reply sent |
+| `SUPPORT_ESCALATION` | Help requests, bug reports, complaints | Reply sent |
+| `CALENDAR_REQUEST` | Meeting or call scheduling requests | Calendar event + Meet link + reply |
+| `JUNK_FILTERED` | Spam, promotions, phishing | Logged only |
+| `AWAY_NOTICE` | Out-of-office, bounce notifications | Logged only |
 
 ---
 
-## tech stack
+## Confidence Routing
 
-core automation:
-
-- n8n self-hosted
-
-llm and inference:
-
-- ollama
-- llama 3.2 1b
-
-email and scheduling:
-
-- gmail api
-- google calendar api
-- google meet
-
-logging and monitoring:
-
-- google sheets
-- slack
+| Score | Decision |
+|---|---|
+| `≥ 0.85` | `AUTO_ACT` — immediate automated action |
+| `0.70 – 0.84` | `ACT_FLAGGED` — action taken, `review_pending = TRUE` in Sheets |
+| `< 0.70` | `MANUAL_ONLY` — no action, routed to manual review queue |
+| `JUNK_FILTERED` / `AWAY_NOTICE` | `SILENT_LOG` — logged only, no reply ever sent |
 
 ---
 
-## requirements
+## Requirements
 
-you need:
+- Python 3.11+
+- Ollama running locally (`ollama serve`)
+- Llama 3.2:1b pulled (`ollama pull llama3.2:1b`)
+- Google Workspace account (Gmail, Calendar, Sheets APIs enabled)
+- Slack workspace with an incoming webhook
 
-- a local machine or server
-- docker or native runtime
-- n8n community edition
-- ollama installed locally
-- google workspace account
-- slack workspace
+### Install dependencies
 
-no paid services required.
-
----
-
-## installation summary
-
-1. install n8n  
-2. install ollama  
-3. pull llama 3.2 1b  
-4. configure google oauth credentials  
-5. configure slack bot token  
-6. set environment variables  
-7. import n8n workflows  
-8. start processing emails  
-
-the system runs continuously once deployed.
+```bash
+pip install \
+  google-auth \
+  google-auth-oauthlib \
+  google-auth-httplib2 \
+  google-api-python-client \
+  requests \
+  python-dotenv
+```
 
 ---
 
-## environment variables
+## Setup
 
-example:
+**1. Clone and configure environment**
 
-N8N_BASIC_AUTH_ACTIVE=true
-N8N_BASIC_AUTH_USER=admin
-N8N_BASIC_AUTH_PASSWORD=changeme
-OLLAMA_HOST=127.0.0.1
-OLLAMA_PORT=11434
+```bash
+cp .env.example .env
+```
 
+Fill in all values in `.env` — sheet ID, calendar ID, Slack webhook, and OAuth paths.
 
-secrets should be stored using n8n credentials in production.
+**2. Enable Google APIs**
 
----
+In [Google Cloud Console](https://console.cloud.google.com):
+- Enable Gmail API, Google Calendar API, Google Sheets API
+- Create OAuth 2.0 credentials (Desktop app type)
+- Download `credentials.json` to the project root
 
-## classification logic
+**3. Write Sheet headers**
 
-the model returns:
+```bash
+python main.py --setup-headers
+```
 
-- intent
-- confidence score from 0 to 1
-- short reasoning
+This runs once. On first execution it will open a browser for Google OAuth consent and cache the token.
 
-decision rules:
+**4. Run health checks**
 
-- confidence >= 0.85  
-  automatic action
+```bash
+python main.py --health
+```
 
-- 0.7 <= confidence < 0.85  
-  automatic action with review flag
+Expected output:
+```
+Health Check
+────────────────────────────────────────
+  ✅  Ollama LLM
+  ✅  Google OAuth
+  ✅  Gmail API
+  ✅  Google Sheets
+  ✅  Slack Webhook
+```
 
-- confidence < 0.7  
-  manual review only
+**5. Start the pipeline**
 
-this avoids risky replies.
-
----
-
-## meeting automation
-
-when a meeting request is accepted:
-
-- an ics invite is generated
-- a google calendar event is created
-- a google meet link is attached
-- timezone is fixed to africa cairo
-- email reply is sent automatically
-
-calendar errors are avoided using explicit tz handling.
-
----
-
-## logging and auditing
-
-every email creates a log entry.
-
-stored fields include:
-
-- sender
-- subject
-- intent
-- confidence
-- action taken
-- timestamps
-- meeting links if created
-- manual review flags
-
-logs live in google sheets.  
-easy to audit.  
-easy to export.
+```bash
+python main.py          # continuous loop (polls every 120s by default)
+python main.py --once   # single pass then exit (useful for cron)
+```
 
 ---
 
-## who should use this
+## Environment Variables
 
-you should use this project if:
+```env
+# n8n / runtime
+POLL_INTERVAL_SECONDS=120
+INITIAL_LOOKBACK_HOURS=24
+MAX_EMAILS_PER_CYCLE=20
 
-- you want email automation without cloud llms
-- you need explainable decisions
-- you care about data locality
-- you already use google workspace
-- you want full control over workflows
+# Ollama
+OLLAMA_BASE_URL=http://127.0.0.1:11434
+OLLAMA_MODEL=llama3.2:1b
+
+# Confidence thresholds
+CONFIDENCE_THRESHOLD_AUTO=0.85
+CONFIDENCE_THRESHOLD_REVIEW=0.70
+
+# Google OAuth
+GOOGLE_CREDENTIALS_PATH=credentials.json
+GOOGLE_TOKEN_PATH=token.json
+
+# Google Sheets
+AUDIT_SHEET_ID=your_sheet_id_here
+AUDIT_SHEET_TAB=email_audit_log
+
+# Google Calendar
+CALENDAR_ID=primary
+
+# Slack
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
+SLACK_NOTIFY_CHANNEL=#email-automation
+
+# Gmail labels (optional)
+GMAIL_PROCESSED_LABEL=concierge/processed
+GMAIL_REVIEW_LABEL=concierge/needs-review
+```
+
+---
+
+## Audit Log Schema
+
+Every processed email writes one row to Google Sheets:
+
+| Column | Key | Example |
+|---|---|---|
+| Timestamp | `processed_at` | `2025-03-12T14:00:00+02:00` |
+| Sender | `sender_address` | `youssef@example.com` |
+| Subject | `email_subject` | `Quick question about pricing` |
+| Intent | `intent_label` | `INQUIRY_STANDARD` |
+| Confidence | `confidence_score` | `0.92` |
+| Action | `action_dispatched` | `REPLY_SENT` |
+| Meet link | `meet_url` | `https://meet.google.com/...` |
+| Review flag | `review_pending` | `FALSE` |
+| Gmail ID | `gmail_message_id` | `<msg-id@mail.gmail.com>` |
+| Event ID | `calendar_event_id` | `abc123xyz` |
+
+---
+
+## Project Structure
+
+```
+ai-email-concierge/
+├── main.py
+├── email_classifier.py
+├── email_responder.py
+├── templates/
+│   ├── standard_inquiry.md
+│   └── schedule_meeting.md
+├── .env.example
+├── credentials.json       ← from Google Cloud Console (not committed)
+├── token.json             ← auto-generated on first run (not committed)
+└── concierge.log          ← auto-generated at runtime
+```
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Language | Python 3.11+ |
+| LLM runtime | Ollama |
+| Model | Llama 3.2:1b |
+| Email | Gmail API |
+| Scheduling | Google Calendar API + Google Meet |
+| Audit log | Google Sheets API |
+| Notifications | Slack Incoming Webhooks |
+| Timezone | `Africa/Cairo` |
