@@ -10,7 +10,7 @@ A self-hosted email automation pipeline. Reads incoming Gmail, classifies intent
 Gmail (unread)
       │
       ▼
-email_classifier.py   ← Llama 3.2:1b
+email_classifier.py   
       │
   intent + confidence
       │
